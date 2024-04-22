@@ -11,6 +11,8 @@ import fnmatch
 from moviepy.editor import VideoFileClip
 from PIL import Image
 import numpy as np
+from transformers import AutoProcessor, Blip2ForConditionalGeneration
+
 
 def process_video(video_path, output_dir, fps_required):
     clip = VideoFileClip(video_path)
@@ -121,6 +123,10 @@ class ModelPredict:
                 'video': to_device(self.modality_transform['video'](self.video), self.device),
         }
 
+        self.processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-2.7b")
+        self.vqa_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16)
+        self.vqa_model.to(self.device)
+
     def __predict__(self, text):
         language = [text]
         self.inputs['language'] = to_device(self.tokenizer(language, max_length=77, padding='max_length',
@@ -133,19 +139,19 @@ class ModelPredict:
             s = torch.softmax(v, dim=0)
             s_flattened = s.view(-1)
 
-            fig, (ax1, ax2) = plt.subplots(1, 2)
+            # fig, (ax1, ax2) = plt.subplots(1, 2)
 
-            # Plot data on the first subplot
-            ax1.plot(v.cpu())
-            ax1.set_title('Dot product')
+            # # Plot data on the first subplot
+            # ax1.plot(v.cpu())
+            # ax1.set_title('Dot product')
 
-            # Plot data on the second subplot
-            ax2.plot(s.cpu())
-            ax2.set_title('Softmax')
+            # # Plot data on the second subplot
+            # ax2.plot(s.cpu())
+            # ax2.set_title('Softmax')
 
-            # Display the figure with the two subplots
-            plt.savefig('img.png')
-            plt.close(fig)
+            # # Display the figure with the two subplots
+            # plt.savefig('img.png')
+            # plt.close(fig)
 
             values_s, indices_s = torch.topk(s_flattened, 10)
             top_videos = [self.video[i] for i in indices_s.tolist()]
@@ -192,32 +198,51 @@ class ModelPredict:
             s_flattened = s.view(-1)
             values_s, indices_s = torch.topk(s_flattened, 5)
             top_images = [images[i] for i in indices_s.tolist()]
+            image_paths = []
+            answers = " "
             for i, im in enumerate(top_images):
                 plt.imshow(im)
                 plt.savefig(f"{self.output_dir}/frame{i}.jpg")  # For JPEG
+                image_paths.append(f"{self.output_dir}/frame{i}.jpg")
+                if 'how many' in text:
+                    question = text
+                else:
+                    question = f'Is there a {text} in the image?'
+                prompt = f"Question: {question} Answer:" 
+                inputs = self.processor(Image.fromarray(im.astype('uint8')), text=prompt, return_tensors="pt").to(self.device, torch.float16)
+                generated_ids = self.vqa_model.generate(**inputs, max_new_tokens=100)
+                generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+                answers += f"{generated_text}\n" 
+                print(generated_text)
 
             # top_videos.sort(key=lambda x: int(re.findall(r'\d+', x.split('/')[-1])[0]))
             # clips = [VideoFileClip(video) for video in top_videos]
             # final_clip = concatenate_videoclips(clips)
             # final_clip.write_videofile(f"{self.output_dir}/final_video.mp4")
 
-            return best_matched_video
+            return best_matched_video, image_paths, answers
 
 
 def chat_with_model(text):
     global model
-    top_video_path = model.__predict__(text)
+    top_video_path, image_paths, output_text = model.__predict__(text)
     # Return the video path
-    return top_video_path 
+    return top_video_path, image_paths, output_text
 
 
 with gr.Blocks(title="Query-driven video putput",css="#chatbot {overflow:auto; height:500px;} #InputVideo {overflow:visible; height:320px;} footer {visibility: none}") as demo:
     with gr.Row():
-        gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
+        #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
         chatbot = gr.Interface(
             fn=chat_with_model,
             inputs='text',
-            outputs='video',
+            outputs = [
+                gr.Video(label="Video Output"), 
+                gr.Gallery(columns=[5], rows=[1], label="Image Output", object_fit="contain", height="auto"), 
+                gr.Textbox(label="Text Output")
+            #outputs='video',
+            ]
+                    
         )
 
 
