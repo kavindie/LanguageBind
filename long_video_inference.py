@@ -165,62 +165,45 @@ class ModelPredict:
             num_secs = 8//self.fps_required
             
             start_time = []
-            for n in range(3):
-                vid = top_videos[n]
+            for vid in top_videos:
                 vid_num = int(re.findall(r'\d+', vid.split('/')[-1])[0])
                 i = vid_num * num_secs
                 start_time.append(i)
-                # end_time = min(i + num_secs, clip.duration)
             start_time.sort()
-
-            clips = [clip.subclip(s, min(s+8 , clip.duration)) for s in start_time]
-            final_clip = concatenate_videoclips(clips)
-            final_clip.write_videofile(f"{self.output_dir}/final_video_{text}.mp4")
-
-            # Initialize a list to hold all frames
-            images = []
-            for subclip in clips:
-                num_frames = int(subclip.fps * subclip.duration)
-                for i in range(num_frames):
-                    # Get the frame at the current time
-                    t = i / subclip.fps
-                    frame = subclip.get_frame(t)
-                    # Add the frame to the list
-                    images.append(frame)
-            
-            new_inputs = {
-                'image': to_device(self.modality_transform['image'](images), self.device),
-            }
-            new_inputs['language'] = self.inputs['language']
-            embeddings = self.model(new_inputs)
-            v = embeddings['image'] @ embeddings['language'].T
-            s = torch.softmax(v, dim=0)
-            s_flattened = s.view(-1)
-            values_s, indices_s = torch.topk(s_flattened, 5)
-            top_images = [images[i] for i in indices_s.tolist()]
-            image_paths = []
+            top_10_images = []
             answers = " "
-            for i, im in enumerate(top_images):
-                plt.imshow(im)
-                plt.savefig(f"{self.output_dir}/frame{i}.jpg")  # For JPEG
-                image_paths.append(f"{self.output_dir}/frame{i}.jpg")
+            for image_number, s in enumerate(start_time):
+                images = []
+                subclip = clip.subclip(s, min(s+8 , clip.duration))
+                frames = subclip.iter_frames()
+                for frame in frames:
+                    images.append(frame)          
+                
+                new_inputs = {
+                    'image': to_device(self.modality_transform['image'](images), self.device),
+                }
+                new_inputs['language'] = self.inputs['language']
+                embeddings = self.model(new_inputs)
+                v = embeddings['image'] @ embeddings['language'].T
+                s = torch.softmax(v, dim=0)
+                s_flattened = s.view(-1)
+                values_s, indices_s = torch.topk(s_flattened, 1)
+                top_image = [images[i] for i in indices_s.tolist()][0]
+                plt.imshow(top_image)
+                plt.savefig(f"{self.output_dir}/frame{image_number}.jpg")  # For JPEG
+                top_10_images.append(f"{self.output_dir}/frame{image_number}.jpg")
                 if 'how many' in text:
                     question = text
                 else:
                     question = f'Is there a {text} in the image?'
                 prompt = f"Question: {question} Answer:" 
-                inputs = self.processor(Image.fromarray(im.astype('uint8')), text=prompt, return_tensors="pt").to(self.device, torch.float16)
+                inputs = self.processor(Image.fromarray(top_image.astype('uint8')), text=prompt, return_tensors="pt").to(self.device, torch.float16)
                 generated_ids = self.vqa_model.generate(**inputs, max_new_tokens=100)
                 generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
                 answers += f"{generated_text}\n" 
                 print(generated_text)
 
-            # top_videos.sort(key=lambda x: int(re.findall(r'\d+', x.split('/')[-1])[0]))
-            # clips = [VideoFileClip(video) for video in top_videos]
-            # final_clip = concatenate_videoclips(clips)
-            # final_clip.write_videofile(f"{self.output_dir}/final_video.mp4")
-
-            return best_matched_video, image_paths, answers
+            return best_matched_video, top_10_images[:5], answers
 
 
 def chat_with_model(text):
