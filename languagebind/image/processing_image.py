@@ -26,7 +26,11 @@ def get_image_transform(config):
 
 
 def load_and_transform_image(image_path, transform):
-    image = Image.open(image_path)
+    # My new addition
+    if type(image_path) is str:
+        image = Image.open(image_path)
+    else:
+        image = Image.fromarray(image_path)
     image_outputs = transform(image)
     return image_outputs
 
