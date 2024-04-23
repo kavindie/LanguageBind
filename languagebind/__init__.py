@@ -66,8 +66,8 @@ class LanguageBind(nn.Module):
             self.modality_proj[k] = model.visual_projection
             self.modality_scale[k] = model.logit_scale
             self.modality_config[k] = model.config
-        self.modality_encoder['language'] = model.text_model
-        self.modality_proj['language'] = model.text_projection
+        self.modality_encoder['language'] = model.text_model  # ClipTextTransformers
+        self.modality_proj['language'] = model.text_projection  # Linear 768 -> 768
 
         self.modality_encoder = nn.ModuleDict(self.modality_encoder)
         self.modality_proj = nn.ModuleDict(self.modality_proj)
