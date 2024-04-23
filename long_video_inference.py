@@ -208,7 +208,9 @@ def chat_output_image_text(text):
     return image_paths, output_text
 
 with gr.Blocks(title="Video Summarization",css="#chatbot {overflow:auto; height:500px;} #InputVideo {overflow:visible; height:320px;} footer {visibility: none}") as demo:
-    with gr.Tab("Video Output"):
+
+
+    with gr.Tab("Query - Video Output"):
         with gr.Row():
             #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
             chatbot = gr.Interface(
@@ -220,7 +222,7 @@ with gr.Blocks(title="Video Summarization",css="#chatbot {overflow:auto; height:
                 ]
         )
 
-    with gr.Tab("Image + Text Output"):
+    with gr.Tab("Query - Image + Text Output"):
         with gr.Row():
             #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
             chatbot = gr.Interface(
