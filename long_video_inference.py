@@ -17,27 +17,33 @@ from transformers import AutoProcessor, Blip2ForConditionalGeneration
 def process_video(video_path, output_dir, fps_required):
     clip = VideoFileClip(video_path)
     mini_video_files = []
+    images = []
 
     num_secs = 8//fps_required # Todo do not need to be int need to change for loop
     # Iterate over the video in 8-second intervals
-    for i in range(0, int(clip.duration), num_secs):
-        start_time = i
-        end_time = min(i + num_secs, clip.duration)
+    # for i in range(0, int(clip.duration), num_secs):
+    #     start_time = i
+    #     end_time = min(i + num_secs, clip.duration)
 
-        mini_video = clip.subclip(start_time, end_time)
+    #     mini_video = clip.subclip(start_time, end_time)
 
-        mini_video = mini_video.set_duration(num_secs).set_fps(fps_required)
+    #     mini_video = mini_video.set_duration(num_secs).set_fps(fps_required)
 
-        # Define the file name for the mini video
-        file_name = f"{output_dir}/mini_video_{i//num_secs}.mp4"
+    #     # Define the file name for the mini video
+    #     file_name = f"{output_dir}/mini_video_{i//num_secs}.mp4"
 
-        # Write the mini video to a file
-        mini_video.write_videofile(file_name, fps=1)
+    #     # Write the mini video to a file
+    #     mini_video.write_videofile(file_name, fps=1)
 
-        # Append the file name to the list
-        mini_video_files.append(file_name)
+    #     # Append the file name to the list
+    #     mini_video_files.append(file_name)
     
-    return mini_video_files
+    mini_video_files = None
+    frames = clip.iter_frames(fps=fps_required)
+    for f in frames:
+        images.append(f)
+    print(f"I have {len(images)}.")
+    return mini_video_files, images
 
 
 def process_video_cv2(video_path, output_dir, fps_required):
@@ -98,7 +104,7 @@ def process_video_cv2(video_path, output_dir, fps_required):
     return mini_video_files
 
 class ModelPredict:
-    def __init__(self, mini_video_files, output_dir, video_path, fps_required):
+    def __init__(self, mini_video_files, images, output_dir, video_path, fps_required):
         self.output_dir = output_dir
         self.video_path = video_path
         self.fps_required = fps_required
@@ -118,16 +124,26 @@ class ModelPredict:
         pretrained_ckpt = f'LanguageBind/LanguageBind_Image'
         self.tokenizer = LanguageBindImageTokenizer.from_pretrained(pretrained_ckpt, cache_dir='./cache_dir/tokenizer_cache_dir')
         self.modality_transform = {c: transform_dict[c](self.model.modality_config[c]) for c in clip_type.keys()}
-        self.video = mini_video_files
-        self.inputs = {
-                'video': to_device(self.modality_transform['video'](self.video), self.device),
-        }
+        self.videos = mini_video_files
+        self.images = images
+        # Image processing
+        # self.images = []
+        # clip = VideoFileClip(self.video_path)
+        # frames = clip.iter_frames(fps=fps_required)
+        # for f in frames:
+        #     self.images.append(f)
+        # print(f'I have {len(self.images)} to find a similarity from')
 
+        self.inputs = {
+            'video': to_device(self.modality_transform['video'](self.videos), self.device),
+            'image': to_device(self.modality_transform['image'](self.images), self.device),
+        }        
+  
         self.processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-2.7b")
         self.vqa_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16)
         self.vqa_model.to(self.device)
 
-    def __predict__(self, text):
+    def __predict_video__(self, text):
         language = [text]
         self.inputs['language'] = to_device(self.tokenizer(language, max_length=77, padding='max_length',
                                                     truncation=True, return_tensors='pt'), self.device)
@@ -139,101 +155,91 @@ class ModelPredict:
             s = torch.softmax(v, dim=0)
             s_flattened = s.view(-1)
 
-            # fig, (ax1, ax2) = plt.subplots(1, 2)
-
-            # # Plot data on the first subplot
-            # ax1.plot(v.cpu())
-            # ax1.set_title('Dot product')
-
-            # # Plot data on the second subplot
-            # ax2.plot(s.cpu())
-            # ax2.set_title('Softmax')
-
-            # # Display the figure with the two subplots
-            # plt.savefig('img.png')
-            # plt.close(fig)
-
             values_s, indices_s = torch.topk(s_flattened, 10)
-            top_videos = [self.video[i] for i in indices_s.tolist()]
+            top_videos = [self.videos[i] for i in indices_s.tolist()]
             best_matched_video = top_videos[0]
             # print("Video x Text: \n",
             #       torch.softmax(embeddings['video'] @ embeddings['language'].T, dim=-1).detach().cpu().numpy())
             print(f"Top videos are: {top_videos}")
+            return best_matched_video
+    
 
-            print(f"Prepping for the next model")
-            clip = VideoFileClip(self.video_path)
-            num_secs = 8//self.fps_required
-            
-            start_time = []
-            for vid in top_videos:
-                vid_num = int(re.findall(r'\d+', vid.split('/')[-1])[0])
-                i = vid_num * num_secs
-                start_time.append(i)
-            start_time.sort()
-            top_10_images = []
+    def __predict_image__(self, text):
+        language = [text]
+        self.inputs['language'] = to_device(self.tokenizer(language, max_length=77, padding='max_length',
+                                                    truncation=True, return_tensors='pt'), self.device)
+
+        with torch.no_grad():
+            embeddings = self.model(self.inputs)
+        
+            v = embeddings['image'] @ embeddings['language'].T
+            s = torch.softmax(v, dim=0)
+            s_flattened = s.view(-1)
+            values_s, indices_s = torch.topk(s_flattened, 10)
+            top_images = [self.images[i] for i in indices_s.tolist()]
+            top_images_saved = []
+            # best_matched_image = top_images[0]
             answers = " "
-            for image_number, s in enumerate(start_time):
-                images = []
-                subclip = clip.subclip(s, min(s+8 , clip.duration))
-                frames = subclip.iter_frames()
-                for frame in frames:
-                    images.append(frame)          
-                
-                new_inputs = {
-                    'image': to_device(self.modality_transform['image'](images), self.device),
-                }
-                new_inputs['language'] = self.inputs['language']
-                embeddings = self.model(new_inputs)
-                v = embeddings['image'] @ embeddings['language'].T
-                s = torch.softmax(v, dim=0)
-                s_flattened = s.view(-1)
-                values_s, indices_s = torch.topk(s_flattened, 1)
-                top_image = [images[i] for i in indices_s.tolist()][0]
-                plt.imshow(top_image)
-                plt.savefig(f"{self.output_dir}/frame{image_number}.jpg")  # For JPEG
-                top_10_images.append(f"{self.output_dir}/frame{image_number}.jpg")
+            for i, im in enumerate(top_images):
+                plt.imshow(im)
+                plt.savefig(f"{self.output_dir}/frame{i}.jpg")  # For JPEG
+                top_images_saved.append(f"{self.output_dir}/frame{i}.jpg")
                 if 'how many' in text:
                     question = text
                 else:
                     question = f'Is there a {text} in the image?'
                 prompt = f"Question: {question} Answer:" 
-                inputs = self.processor(Image.fromarray(top_image.astype('uint8')), text=prompt, return_tensors="pt").to(self.device, torch.float16)
+                inputs = self.processor(Image.fromarray(im.astype('uint8')), text=prompt, return_tensors="pt").to(self.device, torch.float16)
                 generated_ids = self.vqa_model.generate(**inputs, max_new_tokens=100)
                 generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
                 answers += f"{generated_text}\n" 
-                print(generated_text)
+        
+            return top_images_saved, answers
 
-            return best_matched_video, top_10_images[:5], answers
 
-
-def chat_with_model(text):
+def chat_output_video(text):
     global model
-    top_video_path, image_paths, output_text = model.__predict__(text)
-    # Return the video path
-    return top_video_path, image_paths, output_text
+    top_video_path = model.__predict_video__(text)
+    return top_video_path
 
+def chat_output_image_text(text):
+    global model
+    image_paths, output_text = model.__predict_image__(text)
+    return image_paths, output_text
 
-with gr.Blocks(title="Query-driven video putput",css="#chatbot {overflow:auto; height:500px;} #InputVideo {overflow:visible; height:320px;} footer {visibility: none}") as demo:
-    with gr.Row():
-        #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
-        chatbot = gr.Interface(
-            fn=chat_with_model,
-            inputs='text',
-            outputs = [
-                gr.Video(label="Video Output"), 
-                gr.Gallery(columns=[5], rows=[1], label="Image Output", object_fit="contain", height="auto"), 
-                gr.Textbox(label="Text Output")
-            #outputs='video',
-            ]
-                    
+with gr.Blocks(title="Video Summarization",css="#chatbot {overflow:auto; height:500px;} #InputVideo {overflow:visible; height:320px;} footer {visibility: none}") as demo:
+    with gr.Tab("Video Output"):
+        with gr.Row():
+            #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
+            chatbot = gr.Interface(
+                fn=chat_output_video,
+                inputs='text',
+                outputs = [
+                    gr.Video(label="Video Output"), 
+                #outputs='video',
+                ]
+        )
+
+    with gr.Tab("Image + Text Output"):
+        with gr.Row():
+            #gr.Video(value='/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4', show_label=False)
+            chatbot = gr.Interface(
+                fn=chat_output_image_text,
+                inputs='text',
+                outputs = [
+                    gr.Gallery(columns=[5], rows=[2], label="Image Output", object_fit="contain", height="auto"), 
+                    gr.Textbox(label="Text Output")
+                #outputs='video',
+                ]
         )
 
 
 if __name__ == '__main__':
-    output_dir = '/scratch3/kat049/Ask-Anything/video_chat2/example/output_6'
-    video_path = '/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4'
+    output_dir = '/scratch3/kat049/Ask-Anything/video_chat2/example/out_30'
+    #video_path = '/scratch3/kat049/Ask-Anything/video_chat2/example/camera_long_6.mp4'
+    video_path = '/scratch3/kat049/tmp/out_30.mp4'
     fps_required = 1
-    #mini_video_files = process_video(video_path, output_dir, fps_required)
+    mini_video_files, images = process_video(video_path, output_dir, fps_required)
 
     mini_video_files = []
     for file in os.listdir(output_dir):
@@ -243,6 +249,6 @@ if __name__ == '__main__':
     mini_video_files.sort(key=lambda x: int(re.findall(r'\d+', x.split('/')[-1])[0]))
 
     global model
-    model = ModelPredict(mini_video_files=mini_video_files, output_dir=output_dir, video_path=video_path, fps_required=fps_required)
+    model = ModelPredict(mini_video_files=mini_video_files, images=images, output_dir=output_dir, video_path=video_path, fps_required=fps_required)
     demo.queue()
     demo.launch()
